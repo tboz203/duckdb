@@ -1,11 +1,8 @@
-add_definitions(-DSQLITE_OMIT_LOAD_EXTENSION=1)
+add_compile_definitions(SQLITE_OMIT_LOAD_EXTENSION=1)
 
 include_directories(../sqlite3_api_wrapper/include)
 if(NOT WIN32)
-  add_subdirectory(linenoise)
-  add_definitions(-DHAVE_LINENOISE=1)
   include_directories(../../third_party/utf8proc/include)
-  include_directories(linenoise/include)
 endif()
 set(SHELL_SOURCES ${SHELL_SOURCES} shell.c)
 
@@ -22,6 +19,47 @@ endif()
 
 if(NOT AMALGAMATION_BUILD AND NOT WIN32)
   target_link_libraries(shell duckdb_utf8proc)
+
+  find_path(Readline_ROOT_DIR
+    NAMES include/readline/readline.h
+    PATHS /usr/local/opt/readline/ /opt/readline/
+  )
+  find_path(Readline_INCLUDE_DIR
+    NAMES readline/readline.h
+    HINTS ${Readline_ROOT_DIR}/include
+    NO_DEFAULT_PATH
+  )
+  find_library(Readline_LIBRARY
+    NAMES readline
+    HINTS ${Readline_ROOT_DIR}
+    PATH_SUFFIXES lib64 lib
+    NO_DEFAULT_PATH
+  )
+  find_library(Termcap_LIBRARY
+    NAMES tinfo termcap ncursesw ncurses cursesw curses
+    HINTS ${Readline_ROOT_DIR}
+    PATH_SUFFIXES lib64 lib
+  )
+
+  if(Readline_INCLUDE_DIR AND Readline_LIBRARY AND Termcap_LIBRARY)
+    set(HAVE_READLINE TRUE)
+    mark_as_advanced(HAVE_READLINE)
+  endif()
+endif()
+
+if(HAVE_READLINE)
+  message(DEBUG "Readline_ROOT_DIR: ${Readline_ROOT_DIR}")
+  message(DEBUG "Readline_INCLUDE_DIR: ${Readline_INCLUDE_DIR}")
+  message(DEBUG "Readline_LIBRARY: ${Readline_LIBRARY}")
+  message(DEBUG "Termcap_LIBRARY: ${Termcap_LIBRARY}")
+  add_compile_definitions(HAVE_READLINE=1)
+  include_directories(${Readline_INCLUDE_DIR}/include)
+  target_link_libraries(shell ${Readline_LIBRARY} ${Termcap_LIBRARY})
+else()
+  message(DEBUG "Readline not found; falling back to Linenoise")
+  add_subdirectory(linenoise)
+  add_compile_definitions(HAVE_LINENOISE=1)
+  include_directories(linenoise/include)
 endif()
 
 function(ensure_variable_is_number INPUT_VERSION OUT_RESULT)
