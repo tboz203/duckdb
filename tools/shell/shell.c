@@ -128,6 +128,10 @@ typedef unsigned char u8;
 # include <editline/readline.h>
 #endif
 
+#if HAVE_LINENOISE
+# include "linenoise.h"
+#endif
+
 #if HAVE_EDITLINE || HAVE_READLINE
 
 # define shell_add_history(X) add_history(X)
@@ -138,7 +142,6 @@ typedef unsigned char u8;
 
 #elif HAVE_LINENOISE
 
-# include "linenoise.h"
 # define shell_add_history(X) linenoiseHistoryAdd(X)
 # define shell_read_history(X) linenoiseHistoryLoad(X)
 # define shell_write_history(X) linenoiseHistorySave(X)
@@ -11493,7 +11496,7 @@ static int shell_callback(
       }
       if (strcmp(azArg[0], "logical_plan") == 0
             || strcmp(azArg[0], "logical_opt") == 0
-            || strcmp(azArg[0], "physical_plan") == 0) { 
+            || strcmp(azArg[0], "physical_plan") == 0) {
         utf8_printf(p->out, "\n┌─────────────────────────────┐\n");
         utf8_printf(p->out, "│┌───────────────────────────┐│\n");
         if (strcmp(azArg[0], "logical_plan") == 0) {
@@ -14165,35 +14168,83 @@ void close_db(sqlite3 *db){
 }
 
 #if HAVE_READLINE || HAVE_EDITLINE
+static void _log(const char* fmt, ...) {
+	va_list args;
+	va_start(args, fmt);
+
+	char *zFormatted = sqlite3_vmprintf(fmt, args);
+	rl_save_prompt();
+	rl_clear_visible_line();
+	printf("> %s\n", zFormatted);
+	rl_on_new_line();
+	rl_restore_prompt();
+	sqlite3_free(zFormatted);
+}
+
 /*
 ** Readline completion callbacks
 */
 static char *readline_completion_generator(const char *text, int state){
   static sqlite3_stmt *pStmt = 0;
+  static sqlite3 *localDb;
+  char *zLine;
   char *zRet;
+  int rc;
+
   if( state==0 ){
+    zLine = strndup(rl_line_buffer, rl_point);
     char *zSql;
     sqlite3_finalize(pStmt);
-    zSql = sqlite3_mprintf("SELECT DISTINCT candidate COLLATE nocase"
-                           "  FROM completion(%Q) ORDER BY 1", text);
-    sqlite3_prepare_v2(globalDb, zSql, -1, &pStmt, 0);
+    zSql = sqlite3_mprintf(
+      "SELECT DISTINCT trim(suggestion) "
+      "FROM sql_auto_complete(%Q) "
+      "WHERE lower(suggestion) ^@ lower(%Q) "
+      "ORDER BY suggestion",
+      zLine, text);
+
+    _log("Executing: %s", zSql);
+    if( !globalDb ) {
+      sqlite3_open(":memory:", &localDb);
+      sqlite3_prepare_v2(localDb, zSql, -1, &pStmt, 0);
+    }else{
+      sqlite3_prepare_v2(globalDb, zSql, -1, &pStmt, 0);
+    }
     sqlite3_free(zSql);
+    free(zLine);
   }
-  if( sqlite3_step(pStmt)==SQLITE_ROW ){
+  rc = sqlite3_step(pStmt);
+  if( rc==SQLITE_ROW ){
     zRet = strdup((const char*)sqlite3_column_text(pStmt, 0));
+    _log("Generated: %Q", zRet);
   }else{
+    if( rc==SQLITE_DONE ) {
+      _log("Generation complete");
+    }else{
+      _log("Unexpected return code: %d", rc);
+    }
     sqlite3_finalize(pStmt);
+    if( localDb ){
+      sqlite3_close(localDb);
+    }
     pStmt = 0;
     zRet = 0;
   }
   return zRet;
 }
+
 static char **readline_completion(const char *zText, int iStart, int iEnd){
   rl_attempted_completion_over = 1;
   return rl_completion_matches(zText, readline_completion_generator);
 }
 
-#elif HAVE_LINENOISE
+static void init_readline() {
+  rl_readline_name = "duckdb";
+  rl_sort_completion_matches = 0;
+  rl_attempted_completion_function = readline_completion;
+}
+
+#endif
+#if HAVE_LINENOISE
 /*
 ** Linenoise completion callback
 */
@@ -20196,7 +20247,7 @@ int SQLITE_CDECL wmain(int argc, wchar_t **wargv){
       }
       if( zHistory ){ shell_read_history(zHistory); }
 #if HAVE_READLINE || HAVE_EDITLINE
-      rl_attempted_completion_function = readline_completion;
+      init_readline();
 #elif HAVE_LINENOISE
       linenoiseSetCompletionCallback(linenoise_completion);
 #endif
